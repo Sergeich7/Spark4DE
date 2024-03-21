@@ -1,7 +1,7 @@
 /*
 ОЧИСТКА
-После очистки сразу же прочитайте топик - иначе он может не пересоздаться
-/usr/hdp/current/kafka-broker/bin/kafka-topics.sh --zookeeper XXXXXX:2181 --delete --topic vitaliy_belashov_lab04b_out
+После очистки сразу же прочитайте топик - иначе он может не пересоздаться (см. Receiving messages ниже).
+/usr/hdp/current/kafka-broker/bin/kafka-topics.sh --zookeeper spark-node-1.newprolab.com:2181 --delete --topic vitaliy_belashov_lab04b_out
 
 ЧТЕНИЕ
 /usr/hdp/current/kafka-broker/bin/kafka-console-consumer.sh --bootstrap-server spark-master-1:6667 --topic vitaliy_belashov_lab04b_out
@@ -35,8 +35,6 @@ object agg {
       .add("timestamp", StringType, false)
       .add("uid", StringType, false)
 
-    val ts_start: Integer = 1577865600
-
     spark.readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", "spark-master-1:6667")
@@ -46,10 +44,7 @@ object agg {
       .selectExpr("CAST(value AS STRING)")
       .withColumn("jsonData",from_json(col("value"),schema))
       .select("jsonData.*")
-      .drop("category")
-      .drop("item_id")
-      .withColumn("start_ts", lit(ts_start) +( ($"timestamp" / 1000 -  ts_start) / 3600 ).cast(IntegerType)*3600)
-      .withColumn("end_ts", $"start_ts" + 3600 )
+      .withColumn("timestamp", ($"timestamp" / 1000).cast(TimestampType) )
       .withColumn(
         "purchases",
         when($"event_type" === "buy", lit(1)).otherwise(lit(0))
@@ -58,11 +53,15 @@ object agg {
         "revenue",
         when($"event_type" === "buy", $"item_price").otherwise(lit(0)).cast(IntegerType)
       )
-      .groupBy($"start_ts", $"end_ts").agg(
+      .groupBy(window($"timestamp", "1 hours")).agg(
+        min($"timestamp").as("start_ts"),
         sum($"revenue").as("revenue"),
         count($"uid").as("visitors"),
         sum($"purchases").as("purchases")
       )
+      .drop("window")
+      .withColumn("start_ts", $"start_ts".cast(IntegerType))
+      .withColumn("end_ts", $"start_ts" + 3600)
       .withColumn(
         "aov",
         when($"purchases" =!= 0, $"revenue" / $"purchases").otherwise(lit(0))
@@ -70,7 +69,8 @@ object agg {
       .selectExpr("to_json(struct(*)) AS value")
       .writeStream
       .format("kafka")
-      .trigger(Trigger.ProcessingTime("15 seconds"))
+      .trigger(Trigger.ProcessingTime("15" +
+        " seconds"))
       .outputMode("update")
       .option("checkpointLocation", "cp/" + time.LocalDateTime.now().toString.replace(":","-"))
       .option("kafka.bootstrap.servers", "spark-master-1:6667")
